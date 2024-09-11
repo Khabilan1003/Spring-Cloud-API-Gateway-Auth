@@ -1,0 +1,66 @@
+package com.example.demo.filter;
+
+import java.util.List;
+
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.cloud.gateway.filter.GatewayFilter;
+import org.springframework.cloud.gateway.filter.factory.AbstractGatewayFilterFactory;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.stereotype.Component;
+import org.springframework.web.client.RestTemplate;
+import org.springframework.web.reactive.function.client.WebClient;
+
+import jakarta.ws.rs.core.HttpHeaders;
+import reactor.core.publisher.Mono;
+
+@Component
+public class AuthenticationFilter extends AbstractGatewayFilterFactory<AuthenticationFilter.Config> {
+
+	@Autowired
+	private RouteValidator validator;
+
+	@Autowired
+	private WebClient.Builder webClientBuilder;
+
+	public AuthenticationFilter() {
+		super(Config.class);
+	}
+
+	@Override
+	public GatewayFilter apply(Config config) {
+		return ((exchange, chain) -> {
+			if (validator.isSecured.test(exchange.getRequest())) {
+				// Get the token from the request header
+				String token = exchange.getRequest().getHeaders().getFirst(HttpHeaders.AUTHORIZATION);
+
+				if (token == null || !token.startsWith("Bearer ")) {
+					exchange.getResponse().setStatusCode(HttpStatus.UNAUTHORIZED);
+					return exchange.getResponse().setComplete();
+				}
+
+				// Extract the token part after "Bearer "
+				String actualToken = token.substring(7);
+
+				return webClientBuilder.build().get().uri("http://IDENTITY-SERVICE/auth/verify?token=" + actualToken)
+						.retrieve().onStatus(status -> status.isError(), clientResponse -> {
+							System.out.println(clientResponse.statusCode());
+							return Mono.error(new RuntimeException("Invalid token"));
+						}).bodyToMono(String.class).flatMap(response -> {
+							// If the response is successful, continue with the request
+							return chain.filter(exchange);
+						}).onErrorResume(e -> {
+							// If the token is invalid or any error occurs, return 401
+							e.printStackTrace();
+							exchange.getResponse().setStatusCode(HttpStatus.UNAUTHORIZED);
+							return exchange.getResponse().setComplete();
+						});
+			}
+			return chain.filter(exchange);
+		});
+	}
+
+	public static class Config {
+
+	}
+}
